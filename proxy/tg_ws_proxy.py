@@ -145,7 +145,6 @@ _st_I_net = struct.Struct('!I')
 _st_Ih = struct.Struct('<Ih')
 _st_I_le = struct.Struct('<I')
 _VALID_PROTOS = frozenset((0xEFEFEFEF, 0xEEEEEEEE, 0xDDDDDDDD))
-_WS_PING_FRAME = _st_BB4s.pack(0x80 | 0x9, 0x80 | 0, os.urandom(4))
 
 
 class RawWebSocket:
@@ -621,7 +620,6 @@ async def _bridge_ws(reader, writer, ws: RawWebSocket, label,
     up_packets = 0
     down_packets = 0
     start_time = asyncio.get_event_loop().time()
-    last_recv_time = start_time
 
     async def tcp_to_ws():
         nonlocal up_bytes, up_packets
@@ -648,13 +646,12 @@ async def _bridge_ws(reader, writer, ws: RawWebSocket, label,
             log.debug("[%s] tcp->ws ended: %s", label, e)
 
     async def ws_to_tcp():
-        nonlocal down_bytes, down_packets, last_recv_time
+        nonlocal down_bytes, down_packets
         try:
             while True:
                 data = await ws.recv()
                 if data is None:
                     break
-                last_recv_time = asyncio.get_event_loop().time()
                 n = len(data)
                 _stats.bytes_down += n
                 down_bytes += n
@@ -666,29 +663,11 @@ async def _bridge_ws(reader, writer, ws: RawWebSocket, label,
         except Exception as e:
             log.debug("[%s] ws->tcp ended: %s", label, e)
 
-    async def ws_keepalive():
-        try:
-            while not ws._closed:
-                await asyncio.sleep(2)
-                idle = asyncio.get_event_loop().time() - last_recv_time
-                if idle >= 2 and not ws._closed:
-                    try:
-                        ws.writer.write(_WS_PING_FRAME)
-                        await ws.writer.drain()
-                        log.debug("[%s] %s WS PING (idle %.1fs)",
-                                  label, dc_tag, idle)
-                    except Exception:
-                        break
-        except asyncio.CancelledError:
-            pass
-
-    ka_task = asyncio.create_task(ws_keepalive())
     tasks = [asyncio.create_task(tcp_to_ws()),
              asyncio.create_task(ws_to_tcp())]
     try:
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     finally:
-        ka_task.cancel()
         for t in tasks:
             t.cancel()
         for t in tasks:
